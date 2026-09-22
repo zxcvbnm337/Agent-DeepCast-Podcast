@@ -55,7 +55,9 @@
               </div>
 
               <!-- Audio Player -->
-              <div class="player-audio-wrap mb-5">
+              <!-- 历史记录里可能存在「只有报告、没有音频」的运行，此时不渲染空的播放器，
+                   而是明确告知用户，避免出现空白控件和无效的下载链接 -->
+              <div v-if="audioUrl" class="player-audio-wrap mb-5">
                 <audio
                   ref="audioPlayer"
                   :src="audioUrl"
@@ -65,10 +67,14 @@
                   @pause="isPlaying = false"
                 ></audio>
               </div>
+              <div v-else class="player-audio-wrap mb-5 flex items-center justify-center gap-2 py-4">
+                <span class="text-base">📄</span>
+                <span class="text-xs text-gray-400">本条记录没有生成音频，仅保留研究报告</span>
+              </div>
 
               <!-- Action Buttons -->
               <div class="flex flex-col gap-2.5">
-                <a :href="audioUrl" download class="player-btn-primary" aria-label="下载播客 MP3 文件">
+                <a v-if="audioUrl" :href="audioUrl" download class="player-btn-primary" aria-label="下载播客 MP3 文件">
                   <svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                   下载 MP3
                 </a>
@@ -100,7 +106,15 @@
             </div>
             <!-- Report Content -->
             <div class="report-content custom-scrollbar" style="height: calc(100% - 48px);">
-              <article class="prose prose-sm prose-invert max-w-none report-prose" v-html="renderedReport"></article>
+              <article
+                v-if="reportMarkdown"
+                class="prose prose-sm prose-invert max-w-none report-prose"
+                v-html="renderedReport"
+              ></article>
+              <div v-else class="flex flex-col items-center justify-center text-center px-6" style="height: 100%;">
+                <span class="text-2xl">📭</span>
+                <p class="text-xs text-gray-500 mt-3">本条记录没有保存报告正文</p>
+              </div>
             </div>
           </div>
         </div>
