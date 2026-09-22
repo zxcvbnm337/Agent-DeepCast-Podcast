@@ -15,11 +15,14 @@
       :is-waiting="isWaiting"
       :waiting-dots="waitingDots"
       :production-stage="productionStage"
+      :failed-at="failedAt"
+      :status-message="currentStatusMessage"
       :progress-percent="progressPercent"
       :report-ready="reportReady"
       :podcast-ready="podcastReady"
       :audio-url="audioUrl"
       @cancel="cancelProduction"
+      @back="backToSetup"
       @download-report="downloadReport"
       @go-player="currentView = 'player'"
     />
@@ -52,6 +55,8 @@ type ViewState = "setup" | "producing" | "player";
 // --- State ---
 const currentView = ref<ViewState>("setup");
 const productionStage = ref<ProductionStage>("research");
+// 记录失败发生在哪一步，让 Pipeline 仍能高亮出错的阶段
+const failedAt = ref<ProductionStage>("research");
 const form = reactive({ topic: "" });
 
 const logs = ref<LogEntry[]>([]);
@@ -93,6 +98,19 @@ function stopWaitingAnimation() {
   }
 }
 
+const TERMINAL_STAGES: ProductionStage[] = ["done", "cancelled", "failed"];
+
+/**
+ * 判断是否已进入终态。
+ *
+ * 参数显式标注类型是必要的：TypeScript 的控制流分析会把 `productionStage.value`
+ * 收窄成 startProduction 开头赋的字面量 "research"，导致与 "done" / "cancelled"
+ * 比较时误报 TS2367（两侧无重叠）。
+ */
+function isTerminalStage(stage: ProductionStage) {
+  return TERMINAL_STAGES.includes(stage);
+}
+
 function addLog(message: string) {
   const time = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
   logs.value.push({ time, message });
@@ -122,6 +140,7 @@ async function startProduction() {
 
   abortController = new AbortController();
   currentTaskId = null;
+  failedAt.value = "research";
   startWaitingAnimation();
 
   addLog("🚀 启动 DeepCast 制作流程...");
@@ -147,6 +166,17 @@ async function startProduction() {
     }
   } finally {
     stopWaitingAnimation();
+    // 兜底：若事件流既没有给出 done / cancelled / error 就结束了（服务端进程崩溃、
+    // 网络中断、代理超时等），必须显式收尾，否则界面会永远停在「正在处理...」，
+    // 用户无法判断是仍在运行还是已经失败。
+    // 显式标注让 TS 不要用控制流收窄后的字面量类型
+    const stageAfterRun: ProductionStage = productionStage.value;
+    if (!isTerminalStage(stageAfterRun)) {
+      failedAt.value = stageAfterRun;
+      productionStage.value = "failed";
+      currentStatusMessage.value = "制作中断：事件流意外结束";
+      addLog("❌ [ERROR] 事件流意外结束（未收到完成或失败事件）");
+    }
   }
 }
 
@@ -268,6 +298,18 @@ function handleStreamEvent(event: ResearchStreamEvent) {
     }
   }
 
+  if (event.type === "error") {
+    const detail = String((event as any).detail || (event as any).message || "未知错误");
+    addLog(`❌ [ERROR] 制作中断：${detail}`);
+    stopWaitingAnimation();
+    if (productionStage.value !== "failed") {
+      failedAt.value = productionStage.value;
+    }
+    productionStage.value = "failed";
+    currentStatusMessage.value = `制作失败：${detail}`;
+    return;
+  }
+
   if (event.type === "cancelled") {
     const msg = (event as any).message || "研究任务已取消";
     addLog(`🛑 [CANCELLED] ${msg}`);
@@ -341,6 +383,16 @@ function resetApp() {
   reportReady.value = false;
   podcastReady.value = false;
   audioUrl.value = "";
+  stopWaitingAnimation();
+}
+
+/**
+ * 失败后返回设置页，但保留已填主题，方便用户直接重试。
+ * （resetApp 会清空主题，用于播放器页的「重新开始」。）
+ */
+function backToSetup() {
+  currentView.value = "setup";
+  currentStatusMessage.value = "";
   stopWaitingAnimation();
 }
 

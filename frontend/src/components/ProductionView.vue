@@ -15,7 +15,11 @@
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
               研究报告
             </button>
-            <button v-if="!podcastReady" class="nav-action-btn text-red-400" @click="$emit('cancel')" aria-label="取消制作">
+            <button v-if="isFailed" class="nav-action-btn text-blue-300" @click="$emit('back')" aria-label="返回重试">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 17l-5-5m0 0l5-5m-5 5h12"/></svg>
+              返回重试
+            </button>
+            <button v-else-if="!podcastReady" class="nav-action-btn text-red-400" @click="$emit('cancel')" aria-label="取消制作">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
               取消
             </button>
@@ -43,6 +47,7 @@
               <div class="flex items-center gap-3 mb-2 z-10 relative">
                 <div class="pipeline-icon-badge">
                   <span v-if="productionStage === 'done'" class="text-lg">✅</span>
+                  <span v-else-if="isFailed" class="text-lg">❌</span>
                   <svg v-else class="w-5 h-5 text-blue-400 animate-spin-slow" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
@@ -103,16 +108,19 @@
               <div class="z-10 relative mt-3">
                 <div class="pipeline-status-chip" :class="{
                   'pipeline-status-chip--done': productionStage === 'done',
-                  'pipeline-status-chip--cancelled': isCancelled
+                  'pipeline-status-chip--cancelled': isCancelled,
+                  'pipeline-status-chip--failed': isFailed
                 }">
                   <span class="inline-block w-1.5 h-1.5 rounded-full mr-2" :class="
                     productionStage === 'done' ? 'bg-emerald-400' :
                     isCancelled ? 'bg-red-400' :
+                    isFailed ? 'bg-red-400' :
                     'bg-blue-400 animate-pulse'
                   "></span>
                   <span class="text-[11px] font-medium">{{
                     productionStage === 'done' ? '制作完成' :
                     isCancelled ? '已取消' :
+                    isFailed ? '制作失败' :
                     '正在处理...'
                   }}</span>
                 </div>
@@ -123,6 +131,18 @@
 
         <!-- Right Column: Logs & Output -->
         <div class="lg:col-span-3 flex flex-col gap-4">
+
+          <!-- 失败提示：把后端的 error 事件详情显式呈现出来，避免界面静默卡住 -->
+          <div v-if="isFailed" class="failure-banner rounded-xl">
+            <div class="flex items-start gap-3">
+              <span class="text-lg leading-none mt-0.5">⚠️</span>
+              <div class="min-w-0 flex-1">
+                <p class="text-sm font-semibold text-red-300">制作未能完成</p>
+                <p class="text-xs text-red-200/80 mt-1 break-words">{{ statusMessage || '任务已中断，详情见下方日志。' }}</p>
+              </div>
+              <button class="nav-action-btn text-blue-300 flex-shrink-0" @click="$emit('back')">返回重试</button>
+            </div>
+          </div>
 
           <!-- macOS Style Terminal -->
           <TerminalLog ref="terminalRef" :logs="logs" :is-waiting="isWaiting" :waiting-dots="waitingDots" />
@@ -163,7 +183,7 @@ import { ref, computed, toRef } from "vue";
 import TerminalLog from "./TerminalLog.vue";
 import type { LogEntry } from "./TerminalLog.vue";
 
-export type ProductionStage = "research" | "script" | "audio" | "done" | "cancelled";
+export type ProductionStage = "research" | "script" | "audio" | "done" | "cancelled" | "failed";
 
 interface PipelineStep {
   id: ProductionStage;
@@ -186,6 +206,10 @@ const props = defineProps<{
   isWaiting: boolean;
   waitingDots: string;
   productionStage: ProductionStage;
+  /** 失败发生在哪一步，用于在失败态下仍高亮出错的阶段 */
+  failedAt: ProductionStage;
+  /** 由父组件维护的状态文案，失败时作为错误详情展示 */
+  statusMessage: string;
   progressPercent: number;
   reportReady: boolean;
   podcastReady: boolean;
@@ -194,6 +218,7 @@ const props = defineProps<{
 
 defineEmits<{
   cancel: [];
+  back: [];
   downloadReport: [];
   goPlayer: [];
 }>();
@@ -207,9 +232,15 @@ function scrollTerminal() {
 defineExpose({ scrollTerminal });
 
 const progress = toRef(props, 'progressPercent');
-const currentIdx = computed(() => stepsOrder.indexOf(props.productionStage));
 
 const isCancelled = computed(() => props.productionStage === 'cancelled');
+const isFailed = computed(() => props.productionStage === 'failed');
+
+// 失败时沿用 failedAt 定位出错的步骤。否则 indexOf('failed') 恒为 -1，
+// 所有步骤都会退化成 pending，看起来像「什么都没开始」。
+const currentIdx = computed(() =>
+  stepsOrder.indexOf(isFailed.value ? props.failedAt : props.productionStage)
+);
 
 const stageLabel = computed(() => {
   const labels: Record<ProductionStage, string> = {
@@ -218,6 +249,7 @@ const stageLabel = computed(() => {
     audio: "正在合成音频...",
     done: "播客制作完成！",
     cancelled: "已取消制作",
+    failed: "制作失败",
   };
   return labels[props.productionStage] || "";
 });
@@ -452,6 +484,19 @@ function isStepPending(stepId: ProductionStage) {
   background: rgba(239, 68, 68, 0.08);
   border-color: rgba(239, 68, 68, 0.15);
   color: #fca5a5;
+}
+.pipeline-status-chip--failed {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+
+/* ── Failure Banner ── */
+.failure-banner {
+  padding: 14px 16px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  backdrop-filter: blur(12px);
 }
 
 /* ── Navbar ── */
