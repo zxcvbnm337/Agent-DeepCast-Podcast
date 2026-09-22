@@ -84,7 +84,8 @@ def create_app() -> FastAPI:
     # 确保输出目录存在（使用绝对路径，基于 backend 根目录）
     backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_dir = os.path.join(backend_root, "output")
-    os.makedirs(output_dir, exist_ok=True)
+    audio_dir = os.path.join(output_dir, "audio")
+    os.makedirs(audio_dir, exist_ok=True)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -124,8 +125,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 挂载静态文件目录，用于访问生成的音频文件
-    app.mount("/output", StaticFiles(directory=output_dir), name="output")
+    # 仅把音频产物目录暴露为静态资源。
+    # output/ 下同时存放 output/notes/*.md 研究笔记与 notes_index.json，
+    # 直接挂载整个 output/ 会让这些内容被匿名下载，因此这里只挂载 audio 子目录。
+    # 前端引用路径保持不变，仍为 /output/audio/<filename>。
+    app.mount("/output/audio", StaticFiles(directory=audio_dir), name="audio")
 
     @app.get("/healthz")
     def health_check() -> dict[str, str]:
@@ -134,7 +138,6 @@ def create_app() -> FastAPI:
     @app.get("/api/audio/latest")
     def get_latest_audio() -> dict[str, Any]:
         """获取最新生成的音频文件。"""
-        audio_dir = os.path.join(output_dir, "audio")
         if not os.path.exists(audio_dir):
             return {"file": None, "error": "音频目录不存在"}
 
