@@ -86,3 +86,6 @@ dist-ssr/
 docs/
 output/
 .github/
+
+# Agent workspace data
+.workbuddy/
