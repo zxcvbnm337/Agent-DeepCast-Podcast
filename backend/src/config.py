@@ -147,9 +147,13 @@ class Configuration(BaseModel):
         description="日志记录级别 (DEBUG, INFO, WARNING, ERROR)",
     )
     llm_timeout: int = Field(
-        default=60,
+        default=600,
         title="LLM 超时",
-        description="LLM 请求超时时间（秒）",
+        description=(
+            "LLM 请求超时时间（秒）。报告阶段走非流式 invoke()，该超时覆盖的是整段生成耗时，"
+            "而非首字节（深度报告单次生成实测约 60–120 秒），因此 60 秒必然超时，"
+            "默认值留足余量以避免报告阶段失败并触发 SDK 自动重试。"
+        ),
     )
     tts_timeout: int = Field(
         default=300,

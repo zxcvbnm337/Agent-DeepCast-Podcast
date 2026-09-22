@@ -106,6 +106,16 @@ class DeepResearchAgent:
         """根据配置偏好实例化 HelloAgentsLLM。"""
         llm_kwargs: dict[str, Any] = {"temperature": 0.0}
 
+        # 必须显式传 timeout。不传时 HelloAgentsLLM 会回落到环境变量 LLM_TIMEOUT 的
+        # 60 秒默认值，而报告阶段走的是 ToolAwareSimpleAgent.run() → llm.invoke()，
+        # 即「非流式」调用：60 秒读超时覆盖的是整段生成的耗时，而非首字节。
+        # 深度报告单次生成实测约 60–120 秒（同模型同量级 prompt 实测 53.6 秒），
+        # 必然被判超时，再叠加 openai SDK 默认 2 次自动重试（每次各 60 秒）后，
+        # 整条 SSE 流以 APITimeoutError 结束。
+        # 注：llm.think() 是流式的，其读超时只约束首字节（实测 1.1 秒），不受此影响。
+        if self.config.llm_timeout:
+            llm_kwargs["timeout"] = self.config.llm_timeout
+
         model_id = model_id_override or self.config.llm_model_id
         if model_id:
             llm_kwargs["model"] = model_id
@@ -410,6 +420,10 @@ class DeepResearchAgent:
             "message": "所有研究任务已完成，正在撰写深度研究报告...",
         }
         yield {"type": "log", "message": f"🧠 正在调用 {self.config.smart_llm_model} 模型撰写深度报告..."}
+        yield {
+            "type": "log",
+            "message": "⏳ 该阶段由模型一次性输出完整报告，通常需要数分钟，期间没有中间进度属于正常现象。",
+        }
 
         if self.is_cancelled():
             return
@@ -450,7 +464,7 @@ class DeepResearchAgent:
             "message": "正在将研究报告转化为双人对谈播客脚本...",
         }
         yield {"type": "log", "message": f"🧠 正在调用 {self.config.fast_llm_model} 模型生成播客脚本..."}
-        yield {"type": "log", "message": "脚本策划专家正在创作 Host (Xiayu) 与 Guest (Liwa) 的对话..."}
+        yield {"type": "log", "message": "脚本策划专家正在创作 Host (Cherry) 与 Guest (Serena) 的对话..."}
 
         if self.is_cancelled():
             return
