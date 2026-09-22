@@ -5,6 +5,7 @@
       v-if="currentView === 'setup'"
       v-model:topic="form.topic"
       @start="startProduction"
+      @open-history="openHistory"
     />
 
     <!-- View 2: Production -->
@@ -36,21 +37,41 @@
       @reset="resetApp"
       @download-report="downloadReport"
     />
+
+    <!-- View 4: History -->
+    <HistoryView
+      v-else-if="currentView === 'history'"
+      :runs="historyRuns"
+      :loading="historyLoading"
+      :error="historyError"
+      @back="currentView = 'setup'"
+      @refresh="loadHistory"
+      @open="openHistoryRun"
+    />
   </div>
 </template>
 
 <script lang="ts" setup>
 import { reactive, ref, nextTick } from "vue";
-import { runResearchStream, cancelResearch, type ResearchStreamEvent } from "./services/api";
+import {
+  runResearchStream,
+  cancelResearch,
+  fetchHistory,
+  fetchHistoryDetail,
+  toAbsoluteUrl,
+  type ResearchStreamEvent,
+  type HistoryRun,
+} from "./services/api";
 
 import SetupView from "./components/SetupView.vue";
 import ProductionView from "./components/ProductionView.vue";
 import PlayerView from "./components/PlayerView.vue";
+import HistoryView from "./components/HistoryView.vue";
 import type { LogEntry } from "./components/TerminalLog.vue";
 import type { ProductionStage } from "./components/ProductionView.vue";
 
 // --- Types ---
-type ViewState = "setup" | "producing" | "player";
+type ViewState = "setup" | "producing" | "player" | "history";
 
 // --- State ---
 const currentView = ref<ViewState>("setup");
@@ -73,6 +94,13 @@ let waitingInterval: ReturnType<typeof setInterval> | null = null;
 
 const reportMarkdown = ref("");
 const audioUrl = ref("");
+
+// 历史记录（从后端 output/ 目录只读重建，不依赖本次会话状态）
+const historyRuns = ref<HistoryRun[]>([]);
+const historyLoading = ref(false);
+const historyError = ref("");
+// 标记当前播放器展示的是历史记录，决定返回时回到历史列表还是设置页
+const playerFromHistory = ref(false);
 
 let abortController: AbortController | null = null;
 let currentTaskId: string | null = null;
@@ -141,6 +169,7 @@ async function startProduction() {
   abortController = new AbortController();
   currentTaskId = null;
   failedAt.value = "research";
+  playerFromHistory.value = false;
   startWaitingAnimation();
 
   addLog("🚀 启动 DeepCast 制作流程...");
@@ -377,13 +406,22 @@ function cancelProduction() {
 }
 
 function resetApp() {
-  currentView.value = "setup";
-  form.topic = "";
+  stopWaitingAnimation();
   currentStatusMessage.value = "";
   reportReady.value = false;
   podcastReady.value = false;
   audioUrl.value = "";
-  stopWaitingAnimation();
+
+  // 从历史记录打开的播放器，返回历史列表而非清空重来
+  if (playerFromHistory.value) {
+    playerFromHistory.value = false;
+    currentView.value = "history";
+    loadHistory();
+    return;
+  }
+
+  currentView.value = "setup";
+  form.topic = "";
 }
 
 /**
@@ -394,6 +432,54 @@ function backToSetup() {
   currentView.value = "setup";
   currentStatusMessage.value = "";
   stopWaitingAnimation();
+}
+
+// --- History ---
+
+async function loadHistory() {
+  historyLoading.value = true;
+  historyError.value = "";
+  try {
+    historyRuns.value = await fetchHistory();
+  } catch (err: any) {
+    historyError.value = err.message || String(err);
+    historyRuns.value = [];
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+function openHistory() {
+  currentView.value = "history";
+  loadHistory();
+}
+
+/**
+ * 打开一条历史记录：拉取详情后复用播放器页展示。
+ * 主题、音频地址、报告正文都直接覆盖到当前状态，播放器无需区分「新生成」与「历史」。
+ */
+async function openHistoryRun(run: HistoryRun) {
+  historyLoading.value = true;
+  historyError.value = "";
+  try {
+    const detail = await fetchHistoryDetail(run.run_id);
+    form.topic = detail.topic || run.topic;
+    audioUrl.value = detail.audio_url ? toAbsoluteUrl(detail.audio_url) : "";
+    reportMarkdown.value = detail.report || "";
+    reportReady.value = !!detail.report;
+    podcastReady.value = !!detail.audio_url;
+    progressPercent.value = 100;
+    currentStatusMessage.value = "";
+    productionStage.value = "done";
+    failedAt.value = "done";
+    logs.value = [];
+    playerFromHistory.value = true;
+    currentView.value = "player";
+  } catch (err: any) {
+    historyError.value = err.message || String(err);
+  } finally {
+    historyLoading.value = false;
+  }
 }
 
 function downloadReport() {

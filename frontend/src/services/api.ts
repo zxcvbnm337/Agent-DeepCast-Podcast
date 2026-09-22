@@ -125,3 +125,45 @@ export async function runResearchStream(
     }
   }
 }
+
+// --- 历史记录 ---
+
+export interface HistoryRun {
+  run_id: string;
+  topic: string;
+  created_at: string | null;
+  /** 后端返回的相对路径，如 /output/audio/xxx.mp3；无音频时为 null */
+  audio_url: string | null;
+  has_report: boolean;
+}
+
+export interface HistoryDetail extends HistoryRun {
+  report: string;
+}
+
+/** 把后端返回的相对路径补全为可直接访问的绝对地址。 */
+export function toAbsoluteUrl(path: string | null | undefined): string {
+  if (!path) return "";
+  return path.startsWith("http") ? path : `${baseURL}${path}`;
+}
+
+/** 获取历史运行列表（已产出报告或播客音频者）。 */
+export async function fetchHistory(): Promise<HistoryRun[]> {
+  const response = await fetch(`${baseURL}/api/history`);
+  if (!response.ok) {
+    throw new Error(`获取历史记录失败，状态码：${response.status}`);
+  }
+  const data = await response.json();
+  return (data?.runs ?? []) as HistoryRun[];
+}
+
+/** 获取单次历史运行的详情（含报告正文）。 */
+export async function fetchHistoryDetail(runId: string): Promise<HistoryDetail> {
+  const response = await fetch(
+    `${baseURL}/api/history/${encodeURIComponent(runId)}`
+  );
+  if (!response.ok) {
+    throw new Error(`获取历史详情失败，状态码：${response.status}`);
+  }
+  return (await response.json()) as HistoryDetail;
+}

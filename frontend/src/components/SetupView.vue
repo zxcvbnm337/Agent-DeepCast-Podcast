@@ -63,6 +63,15 @@
             开始制作播客
           </button>
         </form>
+
+        <!-- 历史记录入口 -->
+        <div class="px-7 pb-6">
+          <div class="setup-divider"></div>
+          <button type="button" class="setup-history-btn w-full" @click="$emit('openHistory')">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            查看历史记录
+          </button>
+        </div>
       </div>
 
       <!-- Footer hint -->
@@ -78,6 +87,7 @@ const topic = defineModel<string>("topic", { required: true });
 
 defineEmits<{
   start: [topic: string];
+  openHistory: [];
 }>();
 </script>
 
@@ -172,6 +182,33 @@ defineEmits<{
   color: #9ca3af;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── 历史记录入口 ── */
+.setup-divider {
+  height: 1px;
+  margin-bottom: 18px;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.1), transparent);
+}
+.setup-history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 11px 18px;
+  border-radius: 11px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.setup-history-btn:hover {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.25);
 }
 
 /* ── Submit Button ── */

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from agent import DeepResearchAgent
 from config import Configuration
+from services.history import HistoryService
 
 # 添加控制台日志处理程序
 # 先清掉 loguru 自带的默认 handler：否则同一行日志会被「默认格式」和「自定义格式」各打一遍。
@@ -105,6 +106,9 @@ def create_app() -> FastAPI:
     audio_dir = os.path.join(output_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
 
+    # 历史记录：只读重建 output/ 下已完成运行的列表（报告 + 最终音频）
+    history_service = HistoryService(output_dir)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """应用生命周期管理：启动时记录配置，关闭时清理资源。"""
@@ -176,6 +180,20 @@ def create_app() -> FastAPI:
         latest_file = max(files, key=os.path.getmtime)
         filename = os.path.basename(latest_file)
         return {"file": filename, "url": f"/output/audio/{filename}"}
+
+    @app.get("/api/history")
+    def list_history() -> dict[str, Any]:
+        """列出历史运行（已产出报告或播客音频者），按时间倒序。"""
+        runs = history_service.list_runs()
+        return {"runs": runs, "count": len(runs)}
+
+    @app.get("/api/history/{run_id}")
+    def get_history_detail(run_id: str) -> dict[str, Any]:
+        """获取单次历史运行的详情（含报告正文）。"""
+        detail = history_service.get_run(run_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"未找到历史记录：{run_id}")
+        return detail
 
     @app.post("/research", response_model=ResearchResponse)
     def run_research(payload: ResearchRequest) -> ResearchResponse:
