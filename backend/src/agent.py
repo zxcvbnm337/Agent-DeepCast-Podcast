@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from queue import Empty, Queue
@@ -30,6 +31,10 @@ from services.summarizer import SummarizationService
 from services.tool_events import ToolCallTracker
 
 logger = logging.getLogger(__name__)
+
+# 并行研究阶段结束后，等待 worker 线程退出的上限（秒）。
+# 超出后放弃等待，并关闭写入窗口，避免残留线程继续改动共享 state。
+WORKER_JOIN_TIMEOUT_SECONDS = 30.0
 
 
 class DeepResearchAgent:
@@ -283,6 +288,9 @@ class DeepResearchAgent:
 
         self._set_tool_event_sink(lambda ev: enqueue(ev))
 
+        # 阶段写入闸门：研究阶段结束后立即关闭，晚到的 worker 不得再改动共享 state
+        phase_closed = Event()
+
         threads: list[Thread] = []
 
         def worker(task: TodoItem, step: int) -> None:
@@ -303,7 +311,13 @@ class DeepResearchAgent:
                     },
                     task=task,
                 )
-                for event in self._execute_task(state, task, emit_stream=True, step=step):
+                for event in self._execute_task(
+                    state,
+                    task,
+                    emit_stream=True,
+                    step=step,
+                    phase_closed=phase_closed,
+                ):
                     if self.is_cancelled():
                         break
                     enqueue(event, task=task)
@@ -337,6 +351,7 @@ class DeepResearchAgent:
 
         active_workers = len(state.todo_items)
         finished_workers = 0
+        cancelled_during_phase = False
 
         try:
             while finished_workers < active_workers:
@@ -345,25 +360,47 @@ class DeepResearchAgent:
                 except Empty:
                     if self.is_cancelled():
                         logger.info("Research cancelled during task execution")
-                        yield {"type": "cancelled", "message": "研究任务已取消"}
-                        return
+                        cancelled_during_phase = True
+                        break
                     continue
                 if event.get("type") == "__task_done__":
                     finished_workers += 1
                     continue
                 yield event
 
-            while True:
-                try:
-                    event = event_queue.get_nowait()
-                except Empty:
-                    break
-                if event.get("type") != "__task_done__":
-                    yield event
+            if not cancelled_during_phase:
+                while True:
+                    try:
+                        event = event_queue.get_nowait()
+                    except Empty:
+                        break
+                    if event.get("type") != "__task_done__":
+                        yield event
         finally:
             self._set_tool_event_sink(None)
+            # 先关闭写入闸门，再等待线程退出。
+            # 这样即使某个 worker 卡在慢速网络调用中，它恢复执行后也不会把结果
+            # 写入已被报告阶段读取的 state；超时后放弃等待也不会产生错误报告。
+            phase_closed.set()
+
+            deadline = time.monotonic() + WORKER_JOIN_TIMEOUT_SECONDS
             for thread in threads:
-                thread.join(timeout=1.0)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=remaining)
+
+            stragglers = sum(1 for thread in threads if thread.is_alive())
+            if stragglers:
+                logger.warning(
+                    "Research phase ended with %d/%d worker thread(s) still running; "
+                    "their late results are discarded to keep the report consistent",
+                    stragglers,
+                    active_workers,
+                )
+
+        # 取消事件统一由 run_stream 在返回前发出，这里不重复 yield，
+        # 否则前端会连续收到两次 cancelled。
 
     def _stream_report_phase(self, state: SummaryState) -> Iterator[dict[str, Any]]:
         """Phase 2: 生成深度研究报告。"""
@@ -567,6 +604,7 @@ class DeepResearchAgent:
         *,
         emit_stream: bool,
         step: int | None = None,
+        phase_closed: Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         对单个任务运行搜索 + 总结逻辑。
@@ -576,6 +614,8 @@ class DeepResearchAgent:
             task: 当前要执行的任务项。
             emit_stream: 是否产生流式事件（True 用于 run_stream，False 用于 run）。
             step: 当前步骤编号（仅用于流式事件）。
+            phase_closed: 研究阶段的写入闸门；一旦被置位，说明本阶段已结束，
+                本次任务的结果必须丢弃，以免污染已被下游读取的 state。
             
         Returns:
             事件字典的迭代器（即使 emit_stream=False，也可能产生少量内部事件，通常被忽略）。
@@ -635,6 +675,16 @@ class DeepResearchAgent:
 
         task.sources_summary = sources_summary
 
+        if phase_closed is not None and phase_closed.is_set():
+            # 阶段已结束（例如等待 worker 超时后放弃），此时写入会与报告阶段并发读取，
+            # 因此直接丢弃本次结果。
+            logger.warning(
+                "Research phase closed before task %s finished; discarding its result",
+                task.id,
+            )
+            task.status = "skipped"
+            return
+
         with self._state_lock:
             state.web_research_results.append(context)
             state.sources_gathered.append(sources_summary)
@@ -676,6 +726,14 @@ class DeepResearchAgent:
         else:
             summary_text = self.summarizer.summarize_task(state, task, context)
             self._drain_tool_events(state)
+
+        if phase_closed is not None and phase_closed.is_set():
+            logger.warning(
+                "Research phase closed while task %s was summarizing; discarding its result",
+                task.id,
+            )
+            task.status = "skipped"
+            return
 
         task.summary = summary_text.strip() if summary_text else "暂无可用信息"
         task.status = "completed"
