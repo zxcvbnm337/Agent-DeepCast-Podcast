@@ -11,6 +11,7 @@ from threading import Lock
 from typing import Any
 
 from models import SummaryState, TodoItem
+from services.tool_params import unwrap_single_input
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +56,17 @@ class ToolCallTracker:
         if not isinstance(parsed_parameters, dict):
             parsed_parameters = {}
 
+        # 模型可能把参数多嵌一层 input（{"input": "{...}"}）。不归一化的话
+        # task_id / note_id / tags 全部取不到，笔记无法挂回任务。
+        parsed_parameters = unwrap_single_input(parsed_parameters)
+
         task_id = self._infer_task_id(parsed_parameters)
         note_id: str | None = None
 
         if tool_name == "note":
             note_id = parsed_parameters.get("note_id")
             if note_id is None:
-                note_id = self._extract_note_id(result_text)
+                note_id = self.extract_note_id(result_text)
 
         event = ToolCallEvent(
             id=len(self._events) + 1,
@@ -230,7 +235,18 @@ class ToolCallTracker:
 
         return None
 
-    def _extract_note_id(self, response: str) -> str | None:
+    def extract_note_id(self, response: str) -> str | None:
+        """从 note 工具的执行结果中提取笔记 ID。
+
+        公开方法：agent 侧直接调用 ``note_tool.run(...)`` 兜底创建笔记后，
+        也需要用同一套规则解析返回文本，因此这里不再以下划线私有化。
+
+        Args:
+            response: note 工具返回的文本，形如「✅ 笔记创建成功\\nID: note_...」。
+
+        Returns:
+            提取到的笔记 ID；未匹配到时返回 None。
+        """
         if not response:
             return None
 

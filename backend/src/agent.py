@@ -12,7 +12,6 @@ from typing import Any
 
 from hello_agents import HelloAgentsLLM, ToolAwareSimpleAgent
 from hello_agents.tools import ToolRegistry
-from hello_agents.tools.builtin.note_tool import NoteTool
 
 from config import Configuration
 from models import SummaryState, SummaryStateOutput, TodoItem
@@ -23,6 +22,7 @@ from prompts import (
 )
 from services.audio_generator import AudioGenerationService
 from services.audio_synthesizer import PodcastSynthesisService
+from services.note_tool import RobustNoteTool
 from services.planner import PlanningService
 from services.reporter import ReportingService
 from services.script_generator import ScriptGenerationService
@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # 超出后放弃等待，并关闭写入窗口，避免残留线程继续改动共享 state。
 WORKER_JOIN_TIMEOUT_SECONDS = 30.0
 
+# 任务总结缺失时的占位文本。定义成常量是为了让「写 task.summary」与
+# 「判断总结是否可用」共用同一个值，避免兜底建笔记时把占位文本当成真实研究内容落库。
+EMPTY_SUMMARY_PLACEHOLDER = "暂无可用信息"
+
 
 class DeepResearchAgent:
     """使用 HelloAgents 协调基于 TODO 的研究工作流的协调器。"""
@@ -48,7 +52,7 @@ class DeepResearchAgent:
         self.fast_llm = self._init_llm(self.config.fast_llm_model)
 
         self.note_tool = (
-            NoteTool(workspace=self.config.notes_workspace)
+            RobustNoteTool(workspace=self.config.notes_workspace)
             if self.config.enable_notes
             else None
         )
@@ -769,17 +773,21 @@ class DeepResearchAgent:
             task.status = "skipped"
             return
 
-        task.summary = summary_text.strip() if summary_text else "暂无可用信息"
+        task.summary = summary_text.strip() if summary_text else EMPTY_SUMMARY_PLACEHOLDER
         task.status = "completed"
 
         if self.note_tool and not task.note_id:
-            # 工具调用协议靠模型输出 [TOOL_CALL:note:...] 文本标记驱动，
-            # 模型没吐出标记时不会报错，只会静默丢失任务笔记。这里显式告警。
-            logger.warning(
-                "Task %s finished without note_id: the summarizer did not emit a "
-                "valid note tool call, so no task note was persisted",
-                task.id,
-            )
+            # 工具调用协议靠模型输出 [TOOL_CALL:note:...] 文本标记驱动，模型可能
+            # 完全不吐标记，或把参数多嵌一层导致调用失败——两条路径都不会报错，
+            # 只会静默丢失任务笔记（报告阶段便读不到该任务的笔记）。
+            # 这里不再只告警，而是用已经生成的总结直接补建笔记，
+            # 让「任务是否有笔记」不再取决于模型是否复现标记。
+            if not self._ensure_task_note(task):
+                logger.warning(
+                    "Task %s finished without a task note: the model's note tool call "
+                    "did not persist one and the fallback declined (see log above)",
+                    task.id,
+                )
 
         if emit_stream:
             for event in self._drain_tool_events(state, step=step):
@@ -810,6 +818,56 @@ class DeepResearchAgent:
         if self._tool_event_sink_enabled:
             return []
         return events
+
+    def _ensure_task_note(self, task: TodoItem) -> str | None:
+        """为任务补建笔记（模型未产出有效 note 调用时的确定性兜底）。
+
+        用任务已经生成的总结文本作为笔记内容，不依赖模型再输出任何标记，
+        因此该路径是确定性的：只要总结拿到了，笔记就一定能落库。
+
+        Args:
+            task: 已完成总结的任务，``task.summary`` 需已赋值。
+
+        Returns:
+            新建笔记的 ID；创建失败或总结不可用时返回 None。
+        """
+        if not self.note_tool:
+            return None
+
+        content = (task.summary or "").strip()
+        if not content or content == EMPTY_SUMMARY_PLACEHOLDER:
+            # 没有真实总结时不要建笔记：否则会把占位文本伪装成研究内容塞进笔记库，
+            # 报告阶段读到的「看似有效」的笔记反而比没有笔记更有误导性。
+            logger.warning(
+                "Task %s has no usable summary; skipping fallback note creation",
+                task.id,
+            )
+            return None
+
+        response = self.note_tool.run(
+            {
+                "action": "create",
+                "title": f"任务 {task.id}: {task.title}",
+                "note_type": "task_state",
+                "tags": ["deep_research", f"task_{task.id}"],
+                "content": content,
+            }
+        )
+
+        note_id = self._tool_tracker.extract_note_id(response)
+        if not note_id:
+            logger.warning(
+                "Fallback note creation for task %s returned no note_id: %r",
+                task.id,
+                response,
+            )
+            return None
+
+        # 笔记 id 与路径都由本方法负责回填，调用方只需判断成功与否
+        task.note_id = note_id
+        if self.config.notes_workspace:
+            task.note_path = str(Path(self.config.notes_workspace) / f"{note_id}.md")
+        return note_id
 
     def _serialize_task(self, task: TodoItem) -> dict[str, Any]:
         """将任务数据类转换为前端可序列化的字典。"""
@@ -861,7 +919,7 @@ class DeepResearchAgent:
                     "content": content,
                 }
             )
-            note_id = self._tool_tracker._extract_note_id(response)
+            note_id = self._tool_tracker.extract_note_id(response)
 
         if not note_id:
             return None
@@ -920,7 +978,7 @@ class DeepResearchAgent:
 
             note_id = parameters.get("note_id")
             if not note_id:
-                note_id = self._tool_tracker._extract_note_id(event.get("result", ""))  # type: ignore[attr-defined]
+                note_id = self._tool_tracker.extract_note_id(event.get("result", ""))
 
             if note_id:
                 return note_id
