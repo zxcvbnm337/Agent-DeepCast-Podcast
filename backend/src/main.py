@@ -8,7 +8,9 @@ import glob
 import json
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
+from threading import Lock
 from typing import Any
 
 # Ensure src directory is in sys.path for module imports
@@ -37,6 +39,15 @@ class ResearchRequest(BaseModel):
     """触发研究运行的负载。"""
 
     topic: str = Field(..., description="用户提供的研究主题")
+
+
+class CancelRequest(BaseModel):
+    """取消研究任务的负载。"""
+
+    task_id: str | None = Field(
+        default=None,
+        description="要取消的任务 ID；留空表示取消当前所有活跃任务",
+    )
 
 class PodcastScript(BaseModel):
     """播客脚本内容模型。"""
@@ -78,8 +89,11 @@ def _build_config(payload: ResearchRequest) -> Configuration:
 def create_app() -> FastAPI:
     """创建并配置 FastAPI 应用实例。"""
 
-    # 当前活跃的研究 agent 引用，用于支持取消操作
-    _active_agent: dict[str, DeepResearchAgent | None] = {"current": None}
+    # 活跃任务注册表：task_id -> agent。
+    # 按任务维度保存而不是单个全局槽位，否则并发请求会互相覆盖引用，
+    # 且任一请求结束时把槽位置空会导致其他任务无法被取消。
+    _active_agents: dict[str, DeepResearchAgent] = {}
+    _active_agents_lock = Lock()
 
     # 确保输出目录存在（使用绝对路径，基于 backend 根目录）
     backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,8 +119,11 @@ def create_app() -> FastAPI:
             _mask_secret(config.llm_api_key),
         )
         yield  # 应用运行中
-        # 关闭时清理
-        _active_agent["current"] = None
+        # 关闭时清理：向所有在途任务发出取消信号
+        with _active_agents_lock:
+            for active in _active_agents.values():
+                active.cancel()
+            _active_agents.clear()
 
     app = FastAPI(title="DeepCast - 自动播客生成智能体", lifespan=lifespan)
 
@@ -123,6 +140,8 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 暴露任务 ID 响应头，便于前端/调试侧按任务取消
+        expose_headers=["X-Task-Id"],
     )
 
     # 仅把音频产物目录暴露为静态资源。
@@ -201,18 +220,45 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/research/cancel")
-    async def cancel_research() -> dict[str, str]:
+    async def cancel_research(payload: CancelRequest | None = None) -> dict[str, Any]:
         """
-        主动取消当前正在执行的研究任务。
+        主动取消正在执行的研究任务。
 
-        前端可以通过此端点显式通知后端停止处理。
+        - 传入 ``task_id`` 时只取消该任务；
+        - 不传（或 ``task_id`` 为空）时取消当前所有活跃任务，兼容旧调用方。
         """
-        agent = _active_agent.get("current")
-        if agent and not agent.is_cancelled():
-            logger.info("Cancel requested via /research/cancel endpoint")
-            agent.cancel()
-            return {"status": "cancelled", "message": "取消请求已发送"}
-        return {"status": "no_task", "message": "当前没有正在运行的任务"}
+        requested_id = payload.task_id if payload else None
+
+        with _active_agents_lock:
+            if requested_id:
+                agent = _active_agents.get(requested_id)
+                if agent is None:
+                    return {
+                        "status": "no_task",
+                        "task_id": requested_id,
+                        "message": "未找到该任务，可能已结束",
+                    }
+                targets = {requested_id: agent}
+                # 从注册表移除，避免重复取消
+                _active_agents.pop(requested_id, None)
+            else:
+                targets = dict(_active_agents)
+
+        if not targets:
+            return {"status": "no_task", "message": "当前没有正在运行的任务"}
+
+        cancelled: list[str] = []
+        for target_id, target_agent in targets.items():
+            if not target_agent.is_cancelled():
+                logger.info("Cancel requested for task_id=%s", target_id)
+                target_agent.cancel()
+                cancelled.append(target_id)
+
+        return {
+            "status": "cancelled",
+            "task_ids": cancelled,
+            "message": f"已请求取消 {len(cancelled)} 个任务",
+        }
 
     @app.post("/research/stream")
     async def stream_research(payload: ResearchRequest, request: Request) -> StreamingResponse:
@@ -225,12 +271,18 @@ def create_app() -> FastAPI:
         try:
             config = _build_config(payload)
             agent = DeepResearchAgent(config=config)
-            _active_agent["current"] = agent  # 注册活跃 agent 以支持取消
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        # 每个请求分配独立 task_id，注册到注册表中以支持精确取消
+        task_id = uuid.uuid4().hex[:12]
+        with _active_agents_lock:
+            _active_agents[task_id] = agent
+
         async def event_iterator():
             loop = asyncio.get_event_loop()
+            # 第一个事件回传 task_id，前端据此调用 /research/cancel
+            yield f"data: {json.dumps({'type': 'task_started', 'task_id': task_id}, ensure_ascii=False)}\n\n"
             # 用 asyncio.Queue 桥接同步生成器和异步循环
             # 生成器在单一后台线程中完整运行，避免并发调用 next() 破坏生成器状态
             event_queue: asyncio.Queue = asyncio.Queue()
@@ -300,7 +352,8 @@ def create_app() -> FastAPI:
                 except asyncio.CancelledError:
                     pass
                 executor.shutdown(wait=False)
-                _active_agent["current"] = None
+                with _active_agents_lock:
+                    _active_agents.pop(task_id, None)
 
         return StreamingResponse(
             event_iterator(),
@@ -308,6 +361,7 @@ def create_app() -> FastAPI:
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
+                "X-Task-Id": task_id,
             },
         )
 

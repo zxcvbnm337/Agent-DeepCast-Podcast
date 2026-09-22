@@ -70,6 +70,7 @@ const reportMarkdown = ref("");
 const audioUrl = ref("");
 
 let abortController: AbortController | null = null;
+let currentTaskId: string | null = null;
 
 const productionRef = ref<InstanceType<typeof ProductionView> | null>(null);
 
@@ -120,6 +121,7 @@ async function startProduction() {
   podcastReady.value = false;
 
   abortController = new AbortController();
+  currentTaskId = null;
   startWaitingAnimation();
 
   addLog("🚀 启动 DeepCast 制作流程...");
@@ -129,7 +131,12 @@ async function startProduction() {
     await runResearchStream(
       { topic: form.topic },
       handleStreamEvent,
-      { signal: abortController.signal }
+      {
+        signal: abortController.signal,
+        onTaskId: (id) => {
+          currentTaskId = id;
+        }
+      }
     );
   } catch (err: any) {
     if (err.name === "AbortError" || err.message?.includes("aborted")) {
@@ -145,6 +152,13 @@ async function startProduction() {
 
 function handleStreamEvent(event: ResearchStreamEvent) {
   console.log("Event:", event.type, event);
+
+  if (event.type === "task_started") {
+    const startedId = String((event as any).task_id || "");
+    if (startedId) {
+      addLog(`🆔 [TASK] 任务 ID: ${startedId}`);
+    }
+  }
 
   if (event.type === "log") {
     const msg = String((event as any).message || "");
@@ -307,7 +321,7 @@ function cancelProduction() {
     }
 
     // 2. 显式调用 cancel API 作为后备（防止 disconnect 检测延迟）
-    cancelResearch().catch(() => {});
+    cancelResearch(currentTaskId ?? undefined).catch(() => {});
 
     stopWaitingAnimation();
     productionStage.value = "cancelled";

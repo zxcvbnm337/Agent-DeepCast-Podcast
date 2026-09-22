@@ -12,14 +12,22 @@ export interface ResearchStreamEvent {
 
 export interface StreamOptions {
   signal?: AbortSignal;
+  /** 服务端分配的任务 ID，用于精确取消 */
+  onTaskId?: (taskId: string) => void;
 }
 
 /**
  * 主动取消后端正在执行的研究任务。
+ *
+ * @param taskId 目标任务 ID；不传则取消后端当前所有活跃任务。
  */
-export async function cancelResearch(): Promise<void> {
+export async function cancelResearch(taskId?: string): Promise<void> {
   try {
-    await fetch(`${baseURL}/research/cancel`, { method: "POST" });
+    await fetch(`${baseURL}/research/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId ?? null })
+    });
   } catch (err) {
     console.warn("Failed to send cancel request:", err);
   }
@@ -52,6 +60,12 @@ export async function runResearchStream(
     throw new Error("浏览器不支持流式响应，无法获取研究进度");
   }
 
+  // 响应头中的任务 ID 先于首个事件到达，可直接用于取消
+  const headerTaskId = response.headers.get("X-Task-Id");
+  if (headerTaskId) {
+    options.onTaskId?.(headerTaskId);
+  }
+
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -71,6 +85,13 @@ export async function runResearchStream(
           try {
             const event = JSON.parse(dataPayload) as ResearchStreamEvent;
             onEvent(event);
+
+            if (event.type === "task_started") {
+              const startedTaskId = String(event.task_id ?? "");
+              if (startedTaskId) {
+                options.onTaskId?.(startedTaskId);
+              }
+            }
 
             if (event.type === "error" || event.type === "done") {
               return;
