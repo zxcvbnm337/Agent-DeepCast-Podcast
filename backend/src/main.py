@@ -27,6 +27,10 @@ from agent import DeepResearchAgent
 from config import Configuration
 
 # 添加控制台日志处理程序
+# 先清掉 loguru 自带的默认 handler：否则同一行日志会被「默认格式」和「自定义格式」各打一遍。
+# 另外 `python src/main.py` 会让本模块被加载两次（`__main__` 一次，uvicorn 按 "main:app"
+# 再导入一次），remove() 也能把重复注册收敛成唯一一个 handler。
+logger.remove()
 logger.add(
     sys.stderr,
     level="INFO",
@@ -106,8 +110,9 @@ def create_app() -> FastAPI:
         """应用生命周期管理：启动时记录配置，关闭时清理资源。"""
         config = Configuration.from_env()
         logger.info(
-            "DeepResearch configuration loaded: provider=%s model=%s base_url=%s search_api=%s "
-            "max_loops=%s fetch_full_page=%s tool_calling=%s strip_thinking=%s api_key=%s",
+            # 注意：loguru 使用 {} 占位符，写成 %s 会原样打印字面量。
+            "DeepResearch configuration loaded: provider={} model={} base_url={} search_api={} "
+            "max_loops={} fetch_full_page={} tool_calling={} strip_thinking={} api_key={}",
             config.llm_provider,
             config.resolved_model() or "unset",
             config.llm_base_url or "unset",
@@ -250,7 +255,7 @@ def create_app() -> FastAPI:
         cancelled: list[str] = []
         for target_id, target_agent in targets.items():
             if not target_agent.is_cancelled():
-                logger.info("Cancel requested for task_id=%s", target_id)
+                logger.info("Cancel requested for task_id={}", target_id)
                 target_agent.cancel()
                 cancelled.append(target_id)
 
