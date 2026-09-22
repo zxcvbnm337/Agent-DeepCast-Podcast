@@ -738,6 +738,15 @@ class DeepResearchAgent:
         task.summary = summary_text.strip() if summary_text else "暂无可用信息"
         task.status = "completed"
 
+        if self.note_tool and not task.note_id:
+            # 工具调用协议靠模型输出 [TOOL_CALL:note:...] 文本标记驱动，
+            # 模型没吐出标记时不会报错，只会静默丢失任务笔记。这里显式告警。
+            logger.warning(
+                "Task %s finished without note_id: the summarizer did not emit a "
+                "valid note tool call, so no task note was persisted",
+                task.id,
+            )
+
         if emit_stream:
             for event in self._drain_tool_events(state, step=step):
                 yield event
