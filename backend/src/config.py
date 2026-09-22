@@ -156,6 +156,16 @@ class Configuration(BaseModel):
         title="TTS 超时",
         description="TTS 请求超时时间（秒）",
     )
+    tts_max_workers: int = Field(
+        default=4,
+        title="TTS 并发数",
+        description="同时进行的 TTS 语音生成请求数上限",
+    )
+    tts_max_retries: int = Field(
+        default=2,
+        title="TTS 重试次数",
+        description="单段语音生成失败后的重试次数（指数退避），0 表示不重试",
+    )
 
     @field_validator("notes_workspace", "audio_output_dir")
     @classmethod

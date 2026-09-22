@@ -506,12 +506,24 @@ class DeepResearchAgent:
             })
             return True
 
+        def audio_failure_callback(position: int, role: str, reason: str) -> None:
+            """把单段失败实时上报，避免用户只看到"段数变少"却不知原因。"""
+            audio_event_queue.put({
+                "type": "audio_segment_failed",
+                "position": position,
+                "total": script_turns,
+                "role": role,
+                "reason": reason,
+                "message": f"[TTS {position}/{script_turns}] ✗ {role} 语音生成失败：{reason}",
+            })
+
         def run_audio_generation() -> None:
             """在单独线程中运行音频生成。"""
             try:
                 files = self.audio_generator.generate_audio(
                     script, task_id, audio_progress_callback,
                     cancel_event=self._cancel_event,
+                    failure_callback=audio_failure_callback,
                 )
                 audio_result.append(files)
             except Exception as e:
@@ -547,6 +559,8 @@ class DeepResearchAgent:
                         "type": "log",
                         "message": f"[TTS {event['current']}/{event['total']}] ✓ {event['role']} 语音已完成",
                     }
+                elif event.get("type") == "audio_segment_failed":
+                    yield {"type": "log", "message": f"⚠️ {event['message']}"}
             except Empty:
                 continue
 
@@ -558,15 +572,21 @@ class DeepResearchAgent:
 
         audio_files = audio_result[0] if audio_result else []
         audio_count = len(audio_files) if audio_files else 0
-        logger.info("DEBUG audio_files = %r", audio_files)
-        logger.info("DEBUG audio_files count = %d", len(audio_files))
-        for f in audio_files:
-            logger.info("DEBUG audio exists=%s path=%s", Path(f).exists(), f)
 
         if audio_error:
             yield {"type": "log", "message": f"⚠️ 音频生成出错: {audio_error[0]}"}
 
-        yield {"type": "log", "message": f"语音生成完成，成功 {audio_count}/{script_turns} 段"}
+        if audio_count < script_turns:
+            # 缺段时合成出来的播客会缺内容，必须显式告知而不是只报一个成功数
+            yield {
+                "type": "log",
+                "message": (
+                    f"⚠️ 语音生成完成，但仅成功 {audio_count}/{script_turns} 段，"
+                    "缺失片段不会出现在最终播客中"
+                ),
+            }
+        else:
+            yield {"type": "log", "message": f"语音生成完成，成功 {audio_count}/{script_turns} 段"}
         yield {
             "type": "audio_generated",
             "files": audio_files,
